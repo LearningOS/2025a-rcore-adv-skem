@@ -29,6 +29,11 @@ use process::*;
 
 /// handle syscall exception with `syscall_id` and other arguments
 pub fn syscall(syscall_id: usize, args: [usize; 3]) -> isize {
+    use crate::task::TASK_MANAGER;
+
+    // ✅ 每次系统调用前，记录统计
+    let current = TASK_MANAGER.get_current_task_id();
+    TASK_MANAGER.inc_syscall_count(current, syscall_id);
     match syscall_id {
         SYSCALL_WRITE => sys_write(args[0], args[1] as *const u8, args[2]),
         SYSCALL_EXIT => sys_exit(args[0] as i32),

@@ -20,7 +20,7 @@ use crate::sync::UPSafeCell;
 use lazy_static::*;
 use switch::__switch;
 pub use task::{TaskControlBlock, TaskStatus};
-
+use crate::config::MAX_SYSCALL_NUM;
 pub use context::TaskContext;
 
 /// The task manager, where all the tasks are managed.
@@ -45,6 +45,8 @@ pub struct TaskManagerInner {
     tasks: [TaskControlBlock; MAX_APP_NUM],
     /// id of current `Running` task
     current_task: usize,
+    task_call_count: [usize; MAX_APP_NUM],
+    syscall_count: [[usize; MAX_SYSCALL_NUM]; MAX_APP_NUM], // 新增系统调用计数
 }
 
 lazy_static! {
@@ -65,6 +67,8 @@ lazy_static! {
                 UPSafeCell::new(TaskManagerInner {
                     tasks,
                     current_task: 0,
+                    task_call_count: [0; MAX_APP_NUM],
+                    syscall_count: [[0; MAX_SYSCALL_NUM]; MAX_APP_NUM],
                 })
             },
         }
@@ -78,17 +82,25 @@ impl TaskManager {
     /// But in ch3, we load apps statically, so the first task is a real app.
     fn run_first_task(&self) -> ! {
         let mut inner = self.inner.exclusive_access();
-        let task0 = &mut inner.tasks[0];
-        task0.task_status = TaskStatus::Running;
-        let next_task_cx_ptr = &task0.task_cx as *const TaskContext;
-        drop(inner);
+
+        // step 1. 修改状态
+        inner.tasks[0].task_status = TaskStatus::Running;
+
+        // step 2. 取任务上下文指针
+        let next_task_cx_ptr = &inner.tasks[0].task_cx as *const TaskContext;
+
+        // ✅ step 3. 更新计数
+        inner.task_call_count[0] += 1;
+
+        drop(inner); // ✅ 显式释放可变借用
+
         let mut _unused = TaskContext::zero_init();
-        // before this, we should drop local variables that must be dropped manually
         unsafe {
             __switch(&mut _unused as *mut TaskContext, next_task_cx_ptr);
         }
         panic!("unreachable in run_first_task!");
     }
+
 
     /// Change the status of current `Running` task into `Ready`.
     fn mark_current_suspended(&self) {
@@ -123,17 +135,70 @@ impl TaskManager {
             let current = inner.current_task;
             inner.tasks[next].task_status = TaskStatus::Running;
             inner.current_task = next;
+
+            // ✅ 增加任务调用次数统计
+            inner.task_call_count[next] += 1;
+
             let current_task_cx_ptr = &mut inner.tasks[current].task_cx as *mut TaskContext;
             let next_task_cx_ptr = &inner.tasks[next].task_cx as *const TaskContext;
             drop(inner);
-            // before this, we should drop local variables that must be dropped manually
             unsafe {
                 __switch(current_task_cx_ptr, next_task_cx_ptr);
             }
-            // go back to user mode
         } else {
+            // 所有任务执行完毕，打印统计信息
+            self.print_task_call_summary();
             panic!("All applications completed!");
         }
+    }
+     /// ✅ 获取指定任务的调用次数
+    pub fn get_task_call_count(&self, task_id: usize) -> usize {
+        let inner = self.inner.exclusive_access();
+        inner.task_call_count[task_id]
+    }
+
+    /// ✅ 打印所有任务调用次数（调试用途）
+    pub fn print_task_call_summary(&self) {
+        let inner = self.inner.exclusive_access();
+        println!("\n=== Task Call Summary ===");
+        for (i, count) in inner.task_call_count.iter().enumerate().take(self.num_app) {
+            println!("Task {} called {} times", i, count);
+        }
+        println!("=========================\n");
+        println!("=== Syscall Count Table ===");
+        for task_id in 0..self.num_app {
+            print!("Task {:2}:", task_id);
+            for syscall_id in 0..20 { // 仅打印前10个 syscall
+                print!(" {:3}", inner.syscall_count[task_id][syscall_id]);
+            }
+            println!(" ...");
+        }
+        println!("============================");
+
+    }
+    /// ✅ 获取当前任务的 ID
+    pub fn get_current_task_id(&self) -> usize {
+        let inner = self.inner.exclusive_access();
+        inner.current_task
+    }
+   
+    /// ✅ 增加当前任务的调用次数并返回更新后的值
+    pub fn inc_task_call_count(&self, id: usize) -> usize {
+        let mut inner = self.inner.exclusive_access();
+        inner.task_call_count[id] += 1;
+        inner.task_call_count[id]
+    }
+    /// ✅ 增加指定任务的系统调用计数
+    pub fn inc_syscall_count(&self, task_id: usize, syscall_id: usize) {
+        let mut inner = self.inner.exclusive_access();
+        if task_id < crate::config::MAX_APP_NUM && syscall_id < crate::config::MAX_SYSCALL_NUM {
+            inner.syscall_count[task_id][syscall_id] += 1;
+        }
+    }
+    /// ✅ 获取指定任务的指定系统调用的调用次数
+    pub fn get_syscall_count(&self, task_id: usize, syscall_id: usize) -> usize {
+        let inner = self.inner.exclusive_access();
+        inner.syscall_count[task_id][syscall_id]
     }
 }
 
@@ -168,4 +233,13 @@ pub fn suspend_current_and_run_next() {
 pub fn exit_current_and_run_next() {
     mark_current_exited();
     run_next_task();
+}
+/// 获取指定任务的调用次数
+pub fn get_task_call_count(task_id: usize) -> usize {
+    TASK_MANAGER.get_task_call_count(task_id)
+}
+
+/// 打印任务调用统计信息
+pub fn print_task_call_summary() {
+    TASK_MANAGER.print_task_call_summary()
 }
